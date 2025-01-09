@@ -1,0 +1,23 @@
+{% extends 'master.html' %}
+
+
+{% block overview_url %} 
+  {% url 'homeview' %}
+{% endblock %}
+
+{% block current_homepage_attribute %}
+  w3-blue
+{% endblock %}
+
+{% block content %}
+    <h2>Edit Product</h2>
+    
+    <form method="POST" action="{% url 'recharge' id=card.id %}">
+        {% csrf_token %}
+        
+        <label for="price">Số tiền muốn nạp:</label>
+        <input type="number" id="added_balance" name="added_balance" value="0" required>
+        
+        <button type="submit">Nạp tiền</button>
+    </form>
+{% endblock %}

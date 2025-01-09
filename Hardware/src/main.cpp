@@ -1,0 +1,616 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <SPI.h>
+#include <unordered_map>
+#include <ArduinoJson.h>
+#include <Cpp_Standard_Library.h>
+#include <ESPAsyncWebServer.h>
+#include <MFRC522.h>
+#include <ESP32Servo.h>
+#include <Wire.h>
+#include <LCD_I2C.h>
+
+
+const int fee = 10;
+int maxSlot = 3;
+int remainingSlot = 3;
+char parkingSlot[3] = {'0', '0', '0'};
+unsigned long errorPrintingTime = 2000;
+
+#define IR_1 32
+#define IR_2 33
+#define IR_3 34
+
+#define SERVO1_PIN 26
+#define SERVO2_PIN 27
+
+// rfid in
+#define SS_PIN_1 5
+#define RST_PIN_1 0
+// rfid out
+#define SS_PIN_2 15
+#define RST_PIN_2 25
+
+const char* ssid = "Chien";
+const char* password = "1234567988";
+
+const char* djangoFetchingServerUrl = "http://172.20.10.2:8000/fetch_data";
+const char* djangoUpdateServerUrl = "http://172.20.10.2:8000/update_card_balance_from_esp";
+
+enum State 
+{
+  IN,
+  OUT
+};
+
+void initServo(Servo &servo, int servoPin) 
+{
+  servo.setPeriodHertz(50);
+  servo.attach(servoPin, 500, 2400);
+}
+
+Servo servo1; // servo in
+Servo servo2; // servo out
+
+LCD_I2C lcd1(0x27, 16, 2);
+LCD_I2C lcd2(0x23, 16, 2);
+std::unordered_map<std::string , std::pair<int, State> > container;
+
+MFRC522 rfid1(SS_PIN_1, RST_PIN_1); 
+MFRC522 rfid2(SS_PIN_2, RST_PIN_2); 
+MFRC522::MIFARE_Key key; 
+
+HTTPClient http;
+AsyncWebServer server(80);
+
+
+void I2C_ScannerWire()
+{
+  byte error, address;
+  int nDevices;
+
+  Serial.println("Scanning...");
+
+  nDevices = 0;
+  for(address = 1; address < 127; address++ )
+  {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+
+    if (error == 0)
+    {
+      Serial.print("I2C device found at address 0x");
+      if (address<16)
+        Serial.print("0");
+      Serial.print(address,HEX);
+      Serial.println("  !");
+
+      nDevices++;
+    }
+    else if (error==4)
+    {
+      Serial.print("Unknown error at address 0x");
+      if (address<16)
+        Serial.print("0");
+      Serial.println(address,HEX);
+    }    
+  }
+  if (nDevices == 0)
+    Serial.println("No I2C devices found\n");
+  else
+    Serial.println("done\n");
+}
+
+void showParkingStatus() 
+{
+  lcd1.clear();
+
+  lcd1.setCursor(0, 0);
+  lcd1.print("S1:");
+  lcd1.print(parkingSlot[0]);  // Show status of slot 1
+
+  lcd1.setCursor(7, 0);
+  lcd1.print("S2:");
+  lcd1.print(parkingSlot[1]);  // Show status of slot 2
+
+  lcd1.setCursor(0, 1);
+  lcd1.print("S3:");
+  lcd1.print(parkingSlot[2]);  // Show status of slot 3
+}
+
+void lcd2Normal() {
+  lcd2.clear();
+  lcd2.setCursor(0,0);
+  lcd2.print("M      C      K");
+}
+
+void fullSlot() {
+  lcd2.clear();
+  lcd2.setCursor(0,0);
+  lcd2.print("HET CHO");
+}
+
+void lcd2Inform(String errorString) {
+  unsigned long currentTime = millis();
+
+  lcd2.clear();
+  lcd2.setCursor(0,0);
+  lcd2.print(errorString);
+}
+
+String convertToHexString(byte *uid, byte length) {
+  String hexString = "";
+  for (byte i = 0; i < length; i++) {
+    if (uid[i] < 0x10) {
+      hexString += "0";  // Add leading zero for single-digit hex values
+    }
+    hexString += String(uid[i], HEX); // Convert byte to hex and append
+    if (i < length - 1) {
+      hexString += " "; // Add a space between bytes, but not after the last one
+    }
+  }
+  hexString.toUpperCase(); // Convert to uppercase
+  return hexString;
+}
+
+void fetchData() 
+{
+  StaticJsonDocument<1024> doc; // Adjust size as needed for your JSON data
+  String jsonData;
+
+  http.begin(djangoFetchingServerUrl);
+  int httpResponseCode = http.GET();
+
+  if (httpResponseCode > 0) {
+    jsonData = http.getString();
+    Serial.println("Data received from server!");
+  } else {
+    Serial.print("Error fetching data!");
+    Serial.println(httpResponseCode);
+    return;
+  }
+
+  DeserializationError error = deserializeJson(doc, jsonData);
+  if (error) {
+    Serial.print("Failed to parse JSON: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  // Populate the map
+  JsonArray array = doc.as<JsonArray>();
+  for (JsonObject card : array) {
+    std::string cardName = card["cardName"].as<std::string>();
+    int cardBalance = atoi(card["cardBalance"].as<const char*>());
+    container[cardName].first = cardBalance;
+    container[cardName].second = State::OUT;
+  }
+
+  http.end();
+}
+
+bool checkCardBalance(int cardBalance) 
+{
+  if (cardBalance >= fee) return true;
+  return false;
+}
+
+void updateCardBalance(String cardName) {
+  std::string stdCardName = cardName.c_str();
+  if (WiFi.status() == WL_CONNECTED) {
+    if (container[stdCardName].first < fee) 
+    {
+      Serial.println("Not enough money!");
+    } else {
+      http.begin(djangoUpdateServerUrl);
+      http.addHeader("Content-Type", "application/json");
+
+      StaticJsonDocument<200> doc;
+      Serial.print("Card name: ");
+      Serial.println(cardName);
+      Serial.print("Balance before: ");
+      Serial.println(container[stdCardName].first);
+
+      doc["cardName"] = cardName;
+      doc["cardNewBalance"] = container[stdCardName].first - fee;
+      container[stdCardName].first = container[stdCardName].first - fee;
+
+      Serial.print("Balance after: ");
+      Serial.println(container[stdCardName].first);
+
+      String jsonString;
+      serializeJson(doc, jsonString);
+
+      // Send POST request
+      int httpResponseCode = http.POST(jsonString);
+
+      // Check response
+      if (httpResponseCode > 0) {
+        String response = http.getString();
+        Serial.println("Response from server: " + response);
+      } else {
+        Serial.println("Error on sending POST: " + String(httpResponseCode));
+      }
+
+      http.end();
+    }
+  }
+}
+
+void openGate(Servo &servo) 
+{
+  for (int i = 180; i >=90; i--) //go from 0 degrees to 90 degrees 
+  { 
+    servo.write(i);
+    delay(10);
+  }
+  delay(4000);
+  for (int i = 90; i <= 180; i++) 
+  {
+    servo.write(i);
+    delay(10);
+  }
+}
+
+void openGateMillis(Servo &servo) {
+  static unsigned long previousTime = 0; // Tracks the last time an action was performed
+  static int state = 0;                 // Tracks the current state of the operation
+  static int angle = 0;                 // Tracks the current angle of the servo
+
+  unsigned long currentTime = millis();
+
+  switch (state) {
+    case 0: // Opening the gate
+      if (currentTime - previousTime >= 10) {
+        previousTime = currentTime;
+        servo.write(angle);
+        angle++;
+        if (angle >= 100) {
+          state = 1; // Move to next state
+          previousTime = currentTime; // Reset timing for the delay
+        }
+      }
+      break;
+
+    case 1: // Waiting with gate open
+      if (currentTime - previousTime >= 4000) {
+        state = 2; // Move to next state
+      }
+      break;
+
+    case 2: // Closing the gate
+      if (currentTime - previousTime >= 10) {
+        previousTime = currentTime;
+        servo.write(angle);
+        angle--;
+        if (angle <= 10) {
+          state = 3; // Operation complete
+        }
+      }
+      break;
+
+    case 3: // Operation finished
+      break;
+  }
+}
+
+void openGate1(Servo &servo) 
+{
+  for (int i = 100; i > 0; i--) //go from 0 degrees to 90 degrees 
+  {  //go from 0 degrees to 180 degrees
+    servo.write(i);
+    delay(10);
+  }
+  delay(4000);
+  for (int i = 0; i < 100; i++) //go from 90 degrees to 0 degrees 
+  {
+    servo.write(i);
+    delay(10);
+  }
+}
+
+void checkSlotStatus() 
+{
+  if (digitalRead(IR_1) == 1) 
+  {
+    parkingSlot[0] = '1';
+  } else {
+    parkingSlot[0]= '0';
+  }
+
+  if (digitalRead(IR_2) == 1) 
+  {
+    parkingSlot[1] = '1';
+  } else {
+    parkingSlot[1]= '0';
+  }
+
+  if (digitalRead(IR_3) == 1) 
+  {
+    parkingSlot[2] = '1';
+  } else {
+    parkingSlot[2]= '0';
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  SPI.begin(); // Init SPI bus
+
+  WiFi.begin(ssid, password);
+  
+  Wire.begin();
+
+  lcd1.begin();
+  lcd1.backlight();
+  lcd1.clear();
+
+  lcd2.begin();
+  lcd2.backlight();
+  lcd2.clear();
+  
+  initServo(servo1, SERVO1_PIN);
+  initServo(servo2, SERVO2_PIN);
+  rfid1.PCD_Init();
+  rfid2.PCD_Init();
+  pinMode(IR_1, INPUT);
+  pinMode(IR_2, INPUT);
+  pinMode(IR_3, INPUT);
+
+  for (byte i = 0; i < 6; i++) {
+    key.keyByte[i] = 0xFF;
+  }
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+
+  // Fetch data
+  fetchData();
+
+  // // Test ESP server
+  server.on("/test_esp_server", HTTP_GET, [](AsyncWebServerRequest *request) {
+     request->send(200, "text/plain", "Hello from ESP32 on port 8000!");
+  });
+
+  // Thiết lập route cho trang web, nhận thông tin từ khi django thêm 1 thẻ RFID mới
+  server.on("/add_data", HTTP_POST, [](AsyncWebServerRequest *request) {
+    String response;
+    if (request->hasParam("cardName", true) && request->hasParam("cardBalance", true)) 
+    {
+      String newCardName = request->getParam("cardName", true)->value();
+      int newCardBalance = request->getParam("cardBalance", true)->value().toInt();
+
+      // In dữ liệu ra Serial Monitor
+      Serial.println("Received Data:");
+      Serial.print("New card Name: ");
+      Serial.println(newCardName);
+      Serial.print("Card Balance: ");
+      Serial.println(newCardBalance);
+
+      container[newCardName.c_str()].first = newCardBalance;
+      Serial.println(container.size());
+      response = "{\"status\":\"success\"}";
+      request->send(200, "application/json", response);
+    } else {
+      if (!request->hasParam("cardName", true)) {
+        Serial.println("Error: Missing parameter 'cardName'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card name'\"}";
+      } else if (!request->hasParam("cardBalance", true)) {
+        Serial.println("Error: Missing parameter 'cardBalance'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card balance'\"}";
+      } else {
+        response = "{\"status\":\"error\",\"message\":\"Missing all\"}";
+      }
+      // Gửi phản hồi lỗi
+      request->send(400, "application/json", response);
+    }
+  });
+
+  // Thiết lập route cho trang web, nhận thông tin từ khi django xóa 1 thẻ RFID 
+  server.on("/delete_data", HTTP_POST, [](AsyncWebServerRequest *request){
+    String response;
+
+    if (request->hasParam("deletedCardName", true)) {
+      String deletedCardName = request->getParam("deletedCardName", true)->value();
+      
+      if (container.find(deletedCardName.c_str()) == container.end()) 
+      {
+        Serial.print("Card Name: ");
+        Serial.print(deletedCardName);
+        Serial.println(" does not exists");
+        request->send(400, "application/json", "{\"status\":\"error\", \"message\":\"Does not exits 'Card name'\"}");
+      } else {
+        // In thông tin ra Serial
+        Serial.println("Delete Request Received:");
+        Serial.print("Card Name: ");
+        Serial.println(deletedCardName);
+
+        container.erase(deletedCardName.c_str());
+        Serial.println(container.size());
+
+        // Gửi phản hồi thành công
+        request->send(200, "application/json", "{\"status\":\"success\"}");
+      }
+    } else {
+      if (!request->hasParam("cardName", true)) {
+        Serial.println("Error: Missing parameter 'cardName'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card name'\"}";
+      } else if (!request->hasParam("cardBalance", true)) {
+        Serial.println("Error: Missing parameter 'cardBalance'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card new balance'\"}";
+      } else {
+        response = "{\"status\":\"error\",\"message\":\"Missing all\"}";
+      }
+      // Gửi phản hồi lỗi
+      request->send(400, "application/json", response);
+    }
+  });
+
+  // Thiết lập route cho trang web, nhận thông tin từ khi django nạp tiền cho RFID 
+  server.on("/update_data", HTTP_POST, [](AsyncWebServerRequest *request){
+    String response;
+    if (request->hasParam("cardName", true) && request->hasParam("newCardBalance", true)) 
+    {
+      String cardName = request->getParam("cardName", true)->value();
+      int newCardBalance = request->getParam("newCardBalance", true)->value().toInt();
+
+      // In dữ liệu ra Serial Monitor
+      Serial.println("Received Data:");
+      Serial.print("Card name: ");
+      Serial.println(cardName);
+      Serial.print("Card new balance: ");
+      Serial.println(newCardBalance);
+
+      container[cardName.c_str()].first = newCardBalance;
+      Serial.println(container.size());
+      response = "{\"status\":\"success\"}";
+      request->send(200, "application/json", response);
+    } else {
+      if (!request->hasParam("cardName", true)) {
+        Serial.println("Error: Missing parameter 'cardName'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card name'\"}";
+      } else if (!request->hasParam("newCardBalance", true)) {
+        Serial.println("Error: Missing parameter 'cardBalance'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'New card balance'\"}";
+      } else {
+        response = "{\"status\":\"error\",\"message\":\"Missing all\"}";
+      }
+      
+      // Gửi phản hồi lỗi
+      request->send(400, "application/json", response);
+    }
+  });
+
+  // Bắt đầu server
+  server.begin();
+
+  lcd2Normal();
+  showParkingStatus();
+}
+
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) 
+  {
+    if (remainingSlot<3) 
+    {
+      if (digitalRead(IR_1) == 1) 
+      {
+        parkingSlot[0] = '0';
+      } else {
+        parkingSlot[0]= '1';
+      }
+
+      if (digitalRead(IR_2) == 1) 
+      {
+        parkingSlot[1] = '0';
+      } else {
+        parkingSlot[1]= '1';
+      }
+
+      if (digitalRead(IR_3) == 1) 
+      {
+        parkingSlot[2] = '0';
+      } else {
+        parkingSlot[2]= '1';
+      }
+    }
+
+    if (remainingSlot == 0) 
+    {
+      fullSlot();
+    }
+
+      if (rfid1.PICC_IsNewCardPresent() && rfid1.PICC_ReadCardSerial()) 
+      {
+        String inHexID = convertToHexString(rfid1.uid.uidByte, rfid1.uid.size);
+        Serial.print("Mode 1: ");
+        Serial.println(inHexID);
+        if (container.find(inHexID.c_str()) != container.end()) 
+        {
+          if (container[inHexID.c_str()].second == State::IN) 
+          {
+            // in thong bao sai cua
+            Serial.println("SANG CUA 2");
+            lcd2.clear();
+            lcd2.setCursor(0,0);
+            lcd2.print("SANG CUA 2");
+          } else {
+            lcd2.clear();
+            lcd2.setCursor(0,0);
+            lcd2.print("MOI VAO");
+            container[inHexID.c_str()].second = State::IN;
+            remainingSlot-=1;
+            openGate1(servo1);
+            lcd2.clear();
+          }
+        } else {
+          // in thong tin khong ton tai the ra lcd
+          lcd2.clear();
+          lcd2.setCursor(0,0);
+          lcd2.print("KHONG CO THE");
+        }
+      }
+
+      if (rfid2.PICC_IsNewCardPresent() && rfid2.PICC_ReadCardSerial()) 
+      {
+        String outHexId = convertToHexString(rfid2.uid.uidByte, rfid2.uid.size);
+        Serial.print("Mode 2: ");
+        Serial.println(outHexId);
+        if (container.find(outHexId.c_str()) != container.end()) 
+        { 
+          if (container[outHexId.c_str()].second != State::IN) 
+          {
+            // in loi: vao sai cua
+            Serial.println("SANG CUA 1");
+            lcd2.clear();
+            lcd2.setCursor(0,0);
+            lcd2.print("SANG CUA 1");
+          } else {
+            if (checkCardBalance(container[outHexId.c_str()].first)) 
+            {
+              updateCardBalance(outHexId);
+              remainingSlot+=1;
+              container[outHexId.c_str()].second = State::OUT;
+              lcd2.clear();
+              lcd2.setCursor(0,0);
+              lcd2.print("RA THANH CONG");
+              openGate(servo2);
+              lcd2.clear();
+            } else {
+              // in loi khong du tien
+              Serial.println("HET TIEN");
+              lcd2.clear();
+              lcd2.setCursor(0,0);
+              lcd2.print("HET TIEN");
+            }
+          }
+        } else {
+          // in thong bao the khong ton tai
+          Serial.println("Khong ton tai the");
+          lcd2.clear();
+          lcd2.setCursor(0,0);
+          lcd2.print("KHONG CO THE");
+        }
+      }
+
+      // Halt PICC
+      rfid1.PICC_HaltA();
+      rfid1.PICC_HaltA();
+
+      // Stop encryption on PCD
+      rfid2.PCD_StopCrypto1();
+      rfid2.PCD_StopCrypto1();
+
+    showParkingStatus();
+    delay(1500); // Dừng 1.5 giây trước khi tiếp tục quét thẻ mới
+  }
+}

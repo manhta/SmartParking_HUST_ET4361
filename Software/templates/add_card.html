@@ -1,0 +1,26 @@
+{% extends 'master.html' %}
+
+{% block overview_url %} 
+  {% url 'homeview' %}
+{% endblock %}
+
+{% block content %}
+    <h2>Thêm thẻ mới</h2>
+
+    <!-- Hiển thị thông báo nếu có -->
+    {% if messages %}
+        <ul>
+            {% for message in messages %}
+                <li class="alert {{ message.tags }}">{{ message }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+
+    <form method="POST">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit" class="btn btn-primary">Thêm thẻ</button>
+    </form>
+
+    <a href="{% url 'homeview' %}" class="btn btn-secondary">Quay lại trang chủ</a>
+{% endblock %}

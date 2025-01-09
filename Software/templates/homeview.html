@@ -1,0 +1,54 @@
+{% extends 'master.html' %}
+
+{% block overview_url %} 
+  # 
+{% endblock %}
+
+{% block current_homepage_attribute %}
+  w3-blue
+{% endblock %}
+
+
+
+{% block content %}
+{% if messages %}
+        <script type="text/javascript">
+            {% for message in messages %}
+                alert("{{ message }}");
+            {% endfor %}
+        </script>
+    {% endif %}
+
+<div class="w3-right">
+  <a href="{% url 'add_card' %}" class="w3-button w3-green w3-round-large">
+    <i class="fa fa-plus"></i>
+  </a>
+</div>
+
+<table class="w3-table w3-bordered w3-centered">
+  <thead>
+    <tr class="w3-green">
+      <th>Mã thẻ</th>
+      <th>Số tiền trong thẻ</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for card in cards %}
+    <tr class="w3-white">
+      <td>{{ card.cardName }}</td>
+      <td>{{ card.cardBalance }}</td>
+      <td>
+        <a href="{% url 'recharge' id=card.id%}" class="w3-button w3-purple"><i class="fa fa-edit"></i></a>
+        <a href="{% url 'delete_card' id=card.id %}" class="w3-button w3-red"><i class="fa fa-trash"></i></a>
+      </td>
+    </tr>
+    {% empty %}
+    <tr class="w3-white">
+      <td colspan="3">Không có dữ liệu</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>  
+
+{% endblock %}

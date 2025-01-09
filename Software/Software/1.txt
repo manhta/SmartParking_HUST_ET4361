@@ -1,0 +1,314 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <SPI.h>
+#include <unordered_map>
+#include <ArduinoJson.h>
+#include <Cpp_Standard_Library.h>
+#include <ESPAsyncWebServer.h>
+#include <MFRC522.h>
+
+const int fee = 10;
+
+#define redPin 26
+#define yelPin 27
+
+#define SS_PIN 5
+#define RST_PIN 0
+ 
+MFRC522 rfid(SS_PIN, RST_PIN); 
+MFRC522::MIFARE_Key key; 
+byte nuidPICC[4]; // Init array that will store new NUID 
+
+const char* ssid = "Quang Huy";
+const char* password = "huy12345";
+
+const char* djangoFetchingServerUrl = "http://192.168.100.15:8000/fetch_data";
+const char* djangoUpdateServerUrl = "http://192.168.100.15:8000/update_card_balance_from_esp";
+
+std::unordered_map<std::string , int> container;
+
+HTTPClient http;
+AsyncWebServer server(80);
+
+
+String convertToHexStringWithSpaces(byte *uid, byte length) {
+  String hexString = "";
+  for (byte i = 0; i < length; i++) {
+    if (uid[i] < 0x10) {
+      hexString += "0";  // Add leading zero for single-digit hex values
+    }
+    hexString += String(uid[i], HEX); // Convert byte to hex and append
+    if (i < length - 1) {
+      hexString += " "; // Add a space between bytes, but not after the last one
+    }
+  }
+  hexString.toUpperCase(); // Convert to uppercase
+  return hexString;
+}
+
+void fetchData() 
+{
+  StaticJsonDocument<1024> doc; // Adjust size as needed for your JSON data
+  String jsonData;
+
+  http.begin(djangoFetchingServerUrl);
+  int httpResponseCode = http.GET();
+
+  if (httpResponseCode > 0) {
+    jsonData = http.getString();
+    Serial.println("Data received from server!");
+  } else {
+    Serial.print("Error fetching data!");
+    Serial.println(httpResponseCode);
+    return;
+  }
+
+  DeserializationError error = deserializeJson(doc, jsonData);
+  if (error) {
+    Serial.print("Failed to parse JSON: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  // Populate the map
+  JsonArray array = doc.as<JsonArray>();
+  for (JsonObject card : array) {
+    std::string cardName = card["cardName"].as<std::string>();
+    int cardBalance = atoi(card["cardBalance"].as<const char*>());
+    container[cardName] = cardBalance;
+  }
+
+  http.end();
+}
+
+
+void updateCardBalance(String cardName) {
+  std::string stdCardName = cardName.c_str();
+  if (WiFi.status() == WL_CONNECTED) {
+    if (container[stdCardName] < fee) 
+    {
+      Serial.println("Not enough money!");
+    } else {
+      http.begin(djangoUpdateServerUrl);
+      http.addHeader("Content-Type", "application/json");
+
+      StaticJsonDocument<200> doc;
+      Serial.print("Card name: ");
+      Serial.println(cardName);
+      Serial.print("Balance before: ");
+      Serial.println(container[stdCardName]);
+
+      doc["cardName"] = cardName;
+      doc["cardNewBalance"] = container[stdCardName] - fee;
+      container[stdCardName] = container[stdCardName] - fee;
+
+      Serial.print("Balance after: ");
+      Serial.println(container[stdCardName]);
+
+      String jsonString;
+      serializeJson(doc, jsonString);
+
+      // Send POST request
+      int httpResponseCode = http.POST(jsonString);
+
+      // Check response
+      if (httpResponseCode > 0) {
+        String response = http.getString();
+        Serial.println("Response from server: " + response);
+      } else {
+        Serial.println("Error on sending POST: " + String(httpResponseCode));
+      }
+
+      http.end();
+    }
+  }
+}
+
+
+void setup() {
+  pinMode(redPin, OUTPUT);
+  pinMode(yelPin, OUTPUT);
+
+  Serial.begin(115200);
+  SPI.begin(); // Init SPI bus
+  rfid.PCD_Init(); // Init MFRC522 
+  WiFi.begin(ssid, password);
+
+  for (byte i = 0; i < 6; i++) {
+    key.keyByte[i] = 0xFF;
+  }
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+
+  // Fetch data
+  fetchData();
+
+  // Test ESP server
+  server.on("/test_esp_server", HTTP_GET, [](AsyncWebServerRequest *request) {
+     request->send(200, "text/plain", "Hello from ESP32 on port 8000!");
+  });
+
+  // Thiết lập route cho trang web, nhận thông tin từ khi django thêm 1 thẻ RFID mới
+  server.on("/add_data", HTTP_POST, [](AsyncWebServerRequest *request) {
+    String response;
+    if (request->hasParam("cardName", true) && request->hasParam("cardBalance", true)) 
+    {
+      String newCardName = request->getParam("cardName", true)->value();
+      int newCardBalance = request->getParam("cardBalance", true)->value().toInt();
+
+      // In dữ liệu ra Serial Monitor
+      Serial.println("Received Data:");
+      Serial.print("New card Name: ");
+      Serial.println(newCardName);
+      Serial.print("Card Balance: ");
+      Serial.println(newCardBalance);
+
+      container[newCardName.c_str()] = newCardBalance;
+      Serial.println(container.size());
+      response = "{\"status\":\"success\"}";
+      request->send(200, "application/json", response);
+    } else {
+      if (!request->hasParam("cardName", true)) {
+        Serial.println("Error: Missing parameter 'cardName'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card name'\"}";
+      } else if (!request->hasParam("cardBalance", true)) {
+        Serial.println("Error: Missing parameter 'cardBalance'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card balance'\"}";
+      } else {
+        response = "{\"status\":\"error\",\"message\":\"Missing all\"}";
+      }
+      // Gửi phản hồi lỗi
+      request->send(400, "application/json", response);
+    }
+  });
+
+  // Thiết lập route cho trang web, nhận thông tin từ khi django xóa 1 thẻ RFID 
+  server.on("/delete_data", HTTP_POST, [](AsyncWebServerRequest *request){
+    String response;
+
+    if (request->hasParam("deletedCardName", true)) {
+      String deletedCardName = request->getParam("deletedCardName", true)->value();
+      
+      if (container.find(deletedCardName.c_str()) == container.end()) 
+      {
+        Serial.print("Card Name: ");
+        Serial.print(deletedCardName);
+        Serial.println(" does not exists");
+        request->send(400, "application/json", "{\"status\":\"error\", \"message\":\"Does not exits 'Card name'\"}");
+      } else {
+        // In thông tin ra Serial
+        Serial.println("Delete Request Received:");
+        Serial.print("Card Name: ");
+        Serial.println(deletedCardName);
+
+        container.erase(deletedCardName.c_str());
+        Serial.println(container.size());
+
+        // Gửi phản hồi thành công
+        request->send(200, "application/json", "{\"status\":\"success\"}");
+      }
+    } else {
+      if (!request->hasParam("cardName", true)) {
+        Serial.println("Error: Missing parameter 'cardName'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card name'\"}";
+      } else if (!request->hasParam("cardBalance", true)) {
+        Serial.println("Error: Missing parameter 'cardBalance'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card new balance'\"}";
+      } else {
+        response = "{\"status\":\"error\",\"message\":\"Missing all\"}";
+      }
+      // Gửi phản hồi lỗi
+      request->send(400, "application/json", response);
+    }
+  });
+
+  // Thiết lập route cho trang web, nhận thông tin từ khi django nạp tiền cho RFID 
+  server.on("/update_data", HTTP_POST, [](AsyncWebServerRequest *request){
+    String response;
+    if (request->hasParam("cardName", true) && request->hasParam("newCardBalance", true)) 
+    {
+      String cardName = request->getParam("cardName", true)->value();
+      int newCardBalance = request->getParam("newCardBalance", true)->value().toInt();
+
+      // In dữ liệu ra Serial Monitor
+      Serial.println("Received Data:");
+      Serial.print("Card name: ");
+      Serial.println(cardName);
+      Serial.print("Card new balance: ");
+      Serial.println(newCardBalance);
+
+      container[cardName.c_str()] = newCardBalance;
+      Serial.println(container.size());
+      response = "{\"status\":\"success\"}";
+      request->send(200, "application/json", response);
+    } else {
+      if (!request->hasParam("cardName", true)) {
+        Serial.println("Error: Missing parameter 'cardName'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'Card name'\"}";
+      } else if (!request->hasParam("newCardBalance", true)) {
+        Serial.println("Error: Missing parameter 'cardBalance'");
+        response = "{\"status\":\"error\",\"message\":\"Missing parameter 'New card balance'\"}";
+      } else {
+        response = "{\"status\":\"error\",\"message\":\"Missing all\"}";
+      }
+      
+      // Gửi phản hồi lỗi
+      request->send(400, "application/json", response);
+    }
+  });
+
+  // Bắt đầu server
+  server.begin();
+}
+
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) 
+  {
+    if ( ! rfid.PICC_IsNewCardPresent())
+    return;
+
+    // Verify if the NUID has been readed
+    if ( ! rfid.PICC_ReadCardSerial())
+      return;
+
+    Serial.print(F("PICC type: "));
+    MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
+    Serial.println(rfid.PICC_GetTypeName(piccType));
+
+    // Check is the PICC of Classic MIFARE type
+    if (piccType != MFRC522::PICC_TYPE_MIFARE_MINI &&  
+      piccType != MFRC522::PICC_TYPE_MIFARE_1K &&
+      piccType != MFRC522::PICC_TYPE_MIFARE_4K) {
+      Serial.println(F("Your tag is not of type MIFARE Classic."));
+      return;
+    }
+
+    if (rfid.uid.uidByte[0] != nuidPICC[0] || 
+      rfid.uid.uidByte[1] != nuidPICC[1] || 
+      rfid.uid.uidByte[2] != nuidPICC[2] || 
+      rfid.uid.uidByte[3] != nuidPICC[3] ) 
+    {
+      Serial.println(F("A new card has been detected."));
+
+
+      String hexID = convertToHexStringWithSpaces(rfid.uid.uidByte, rfid.uid.size);
+
+      updateCardBalance(hexID);
+    }
+
+    // Halt PICC
+    rfid.PICC_HaltA();
+
+    // Stop encryption on PCD
+    rfid.PCD_StopCrypto1();
+  }
+}

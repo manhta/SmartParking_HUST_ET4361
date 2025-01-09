@@ -1,0 +1,87 @@
+
+//---------------------------------Dinh nghia chan ---------------------------------
+#define SERVO_PIN 13  //Khai báo chân cho Servo
+
+//---------------------------------Khai báo hàm---------------------------------
+
+
+//---------------------------------Hàm---------------------------------
+//---------------------------------Servo---------------------------------
+void sg90_init(Servo sg90) {
+    sg90.setPeriodHertz(50); // Standard 50hz servo
+    sg90.attach(SERVO_PIN, 500, 2400); // minimum and maximum pulse width (in us) to go to from 0 to 180 degrees
+}
+void sg90_up(Servo sg90) { // Sử dụng hàm khi muốn mở barrie
+    for (int i = 0; i < 180; i++) {  //go from 0 degrees to 180 degrees
+        sg90.write(i);
+        delay(10);
+    }
+    delay(5000);
+    for (int i = 180; i > 0; i--) { //go from 180 degrees to 0 degrees
+        sg90.write(i);
+        delay(10);
+    }
+}
+
+//---------------------------------LCD---------------------------------
+/* cần khai báo *LiquidCrystal_I2C lcd(0x27,16,2)* o ham main
+    khai báo 6 biến int s1, s2, s3, s4, s5, s6 tương ứng với 6 vị trí ô giữ xe
+    mỗi lần có xe vào hoặc ra thì cập nhật lại biến chứa vị trí ô giữ xe
+    0 là trống, 1 là có xe
+*/
+void lcd_init(LiquidCrystal_I2C lcd) {
+    // can khai bao *LiquidCrystal_I2C lcd(0x27,16,2)* o ham main
+    lcd.init();                      //Khởi tạo LCD
+    lcd.backlight();                 //Bật đèn nền
+}
+
+void lcd_vitri(LiquidCrystal_I2C lcd, int vitri1, int vitri2, int vitri3, int vitri4, int vitri5, int vitri6) { //hàm cập nhật ví trí ô giữ xe
+    lcd.setCursor(0, 0); //Di chuyển con trỏ đến vị trí x, y
+    lcd.print("S1:" + String(vitri1));
+    lcd.setCursor(6,0);
+    lcd.print("S2:" + String(vitri2));
+    lcd.setCursor(12,0);
+    lcd.print("S3:" + String(vitri3));
+}
+
+void lcd_IN(LiquidCrystal_I2C lcd) { // hàm hiển thị chào khi quẹt thẻ vào
+    lcd.clear();
+    lcd.setCursor(2, 0);  
+    lcd.print("XIN MOI VAO");
+    lcd.setCursor(3, 1);
+    lcd.print("BAI DO XE");
+    delay(5000);
+    lcd.clear(); 
+}
+
+void lcd_OUT(LiquidCrystal_I2C lcd) { //hàm hiển thị chào khi quẹt thẻ ra
+    lcd.clear();
+    lcd.setCursor(4, 0);  
+    lcd.print("TAM BIET");
+    lcd.setCursor(2, 1);
+    lcd.print("HEN GAP LAI");
+    delay(5000);
+    lcd.clear();
+}
+
+void lcd_error(LiquidCrystal_I2C lcd){ //Hàm hiển thị khi quẹt thẻ không đúng
+    lcd.clear();
+    lcd.setCursor(0, 0);  
+    lcd.print("THE KHONG HOP LE");
+    lcd.setCursor(0, 1);
+    lcd.print("VUI LONG THU LAI");
+    delay(5000);
+    lcd.clear();
+    lcd_vitri(lcd, s1, s2, s3, s4, s5, s6);
+}
+void lcd_full(LiquidCrystal_I2C lcd){ //Hàm hiển thị khi bãi đỗ xe đã đầy
+    lcd.clear();
+    lcd.setCursor(0, 0);  
+    lcd.print("BAI DO XE DAY");
+    lcd.setCursor(0, 1);
+    lcd.print("VUI LONG QUAY LAI");
+    delay(5000);
+    lcd.clear();
+    lcd_vitri(lcd, s1, s2, s3, s4, s5, s6);
+}
+
